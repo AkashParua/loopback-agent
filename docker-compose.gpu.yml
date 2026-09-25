@@ -1,0 +1,17 @@
+# GPU override (needs the NVIDIA Container Toolkit / Docker Desktop WSL2 GPU support).
+# On a 4 GB GPU the LLM (~2-4 GB) and a YOLO run do not fit together: the backend
+# gets the GPU too, but set LOOPBACK_DEVICE=cpu if training runs out of memory.
+services:
+  agent:
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+  backend:
+    build:
+      args:
+        TORCH_INDEX: https://download.pytorch.org/whl/cu126
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]

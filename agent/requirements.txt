@@ -1,0 +1,6 @@
+pydantic-ai-slim[openai]>=2.50,<3   # code uses the 2.x API (result.usage property, openai_reasoning_effort)
+pydantic>=2.10
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+structlog>=24.1

@@ -1,0 +1,45 @@
+# Loopback agent: 3 services.
+#   agent    - Ollama (qwen3.5:4b-q4_K_M) + PydanticAI harness, stateless inference API on :8000
+#   backend  - the 8-step pipeline, training workers, SQLite memory, runs/ on :8100
+#   frontend - Streamlit UI on :8501 (chat history stays in the browser session)
+#
+# CPU:  docker compose up --build
+# GPU:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+services:
+  agent:
+    build: ./agent
+    ports: ["8000:8000"]
+    environment:
+      LLM_MODEL: qwen3.5:4b-q4_K_M
+      OLLAMA_CONTEXT_LENGTH: "8192"
+      OLLAMA_KEEP_ALIVE: 10m
+    volumes:
+      - ollama:/root/.ollama        # model is pulled once (3.4 GB) and cached here
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports: ["8100:8100"]
+    environment:
+      AGENT_URL: http://agent:8000
+      LOOPBACK_DEVICE: auto
+    volumes:
+      - ./workspace:/workspace      # projects/, runs/, memory.db, weights/
+      - ./datasets:/datasets        # open datasets (scripts/fetch_datasets.py)
+    shm_size: 2gb                   # PyTorch / Ultralytics dataloader workers
+    depends_on: [agent]
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports: ["8501:8501"]
+    environment:
+      BACKEND_URL: http://backend:8100
+      AGENT_URL: http://agent:8000
+    depends_on: [backend]
+    restart: unless-stopped
+
+volumes:
+  ollama:

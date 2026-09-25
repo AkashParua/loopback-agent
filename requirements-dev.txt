@@ -1,0 +1,8 @@
+# Everything in one venv for local dev + tests (Docker images install per-service files).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+-r agent/requirements.txt
+-r backend/requirements.txt
+-r frontend/requirements.txt
+pytest>=8
