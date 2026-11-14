@@ -29,6 +29,17 @@ class AgentClient:
         except (httpx.HTTPError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
 
+    def engine(self) -> dict:
+        try:
+            return httpx.get(f"{self.base_url}/engine", timeout=5).json()
+        except (httpx.HTTPError, ValueError) as exc:
+            return {"available": False, "error": str(exc)}
+
+    def engine_control(self, action: str) -> dict:
+        r = httpx.post(f"{self.base_url}/engine/{action}", timeout=120)
+        r.raise_for_status()
+        return r.json()
+
     def task(self, name: str, context: str, *, choices: Optional[dict[str, list]] = None,
              fallback: Callable[[], dict], validate: Optional[Callable[[dict], Optional[str]]] = None,
              ) -> tuple[dict, str, Optional[str]]:

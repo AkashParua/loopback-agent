@@ -77,7 +77,7 @@ def train_detect(ctx: RunContext) -> dict:
     args = dict(data=str(data_yaml), epochs=cfg.epochs, batch=cfg.batch, imgsz=spec.adapt.imgsz or 640,
                 patience=cfg.patience, device=0 if device == "cuda" else device,
                 project=str(ctx.dir), name="yolo", exist_ok=True, workers=2, seed=0,
-                verbose=False, plots=True, amp=device != "cpu")
+                verbose=False, plots=True, amp=device.startswith("cuda"))
     if cfg.lr:
         args["lr0"] = cfg.lr
     if spec.adapt.fliplr is not None:

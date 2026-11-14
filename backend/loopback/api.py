@@ -7,7 +7,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from . import memory, pipeline, runs
@@ -53,6 +53,35 @@ async def health():
             "agent": await run_in_threadpool(agent.health)}
 
 
+@app.get("/system")
+async def system():
+    """Host memory/CPU, training device, and the inference engine's own telemetry."""
+    import psutil
+    import torch
+
+    vm, sw = psutil.virtual_memory(), psutil.swap_memory()
+    active = [r for r in runs._procs if runs._procs[r].poll() is None]
+    return {"memory": {"total_gb": round(vm.total / 2**30, 2), "available_gb": round(vm.available / 2**30, 2),
+                       "used_pct": vm.percent, "swap_used_gb": round(sw.used / 2**30, 2)},
+            "cpu_pct": psutil.cpu_percent(interval=0.2), "cpu_count": psutil.cpu_count(),
+            "torch": {"version": torch.__version__, "cuda": torch.cuda.is_available(),
+                      "mps": torch.backends.mps.is_available()},
+            "active_runs": active, "engine": await run_in_threadpool(agent.engine)}
+
+
+@app.post("/system/engine/{action}")
+async def engine_control(action: str):
+    try:
+        return await run_in_threadpool(agent.engine_control, action)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"engine {action} failed: {exc}")
+
+
+@app.get("/overview")
+async def overview():
+    return await call(pipeline.overview)
+
+
 @app.get("/datasets")
 async def datasets():
     return await call(pipeline.list_datasets)
@@ -73,6 +102,27 @@ async def list_projects():
 @app.get("/projects/{pid}")
 async def get_project(pid: str):
     return _p(await call(pipeline.load, pid))
+
+
+@app.delete("/projects/{pid}")
+async def delete_project(pid: str):
+    return await call(pipeline.delete_project, pid)
+
+
+@app.get("/projects/{pid}/profile")
+async def profile(pid: str):
+    return await call(pipeline.profile, pid)
+
+
+@app.get("/projects/{pid}/samples.png")
+async def samples(pid: str, n: int = 12, split: Optional[str] = None, seed: int = 0):
+    png = await call(pipeline.samples_png, pid, min(max(n, 1), 24), split, seed)
+    return Response(png, media_type="image/png")
+
+
+@app.get("/projects/{pid}/curves")
+async def curves(pid: str):
+    return await call(pipeline.run_curves, pid)
 
 
 @app.get("/projects/{pid}/digest", response_class=PlainTextResponse)

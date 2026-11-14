@@ -591,7 +591,8 @@ def card_digest(card: dict, max_cols: int = 30) -> str:
         lines = [f"DATA detection format={card['kind']} classes={len(card['classes'])} splits: {splits}"]
         present = sorted((c for c in card["classes"] if c["count"]), key=lambda c: -c["count"])
         zero = len(card["classes"]) - len(present)
-        lines.append("CLASSES (boxes) " + ", ".join(f"{c['name']}={c['count']}" for c in present[:40])
+        lines.append(f"BOXES PER CLASS ({len(card['classes'])} classes) "
+                     + ", ".join(f"{c['name']}={c['count']} boxes" for c in present[:40])
                      + (f" (+{zero} classes with 0 boxes)" if zero else ""))
         bs = card["box_sizes"]
         tot = sum(bs.values()) or 1

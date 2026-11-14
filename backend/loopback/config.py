@@ -14,8 +14,9 @@ DATASETS_DIR = Path(os.getenv("LOOPBACK_DATASETS", ROOT / "datasets")).resolve()
 AGENT_URL = os.getenv("AGENT_URL", "http://127.0.0.1:8000")
 AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "240"))
 
-# Training device: "auto" | "cpu" | "cuda" | "0". On a 4 GB GPU the LLM and a YOLO
-# run do not fit together, so tabular defaults to CPU and detection to auto.
+# Training device: "auto" | "cpu" | "cuda" | "mps" | "0". On a 4 GB GPU the LLM and a YOLO
+# run do not fit together, so tabular defaults to CPU and detection to auto. On Apple
+# Silicon "auto" picks MPS for detection and CPU for small tabular data.
 DEVICE = os.getenv("LOOPBACK_DEVICE", "auto")
 MONITOR_EVERY = int(os.getenv("LOOPBACK_MONITOR_EVERY", "5"))  # epochs between LLM reviews
 LOG_TAIL = int(os.getenv("LOOPBACK_LOG_TAIL", "12"))  # log lines the LLM sees

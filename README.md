@@ -10,10 +10,12 @@ No Azure ML. No Slack. No custom trainers. Use existing libraries only.
 
 ## Setup
 
-There are two ways to run Loopback:
+There are three ways to run Loopback:
 
-- **Option A, Docker (recommended).** Three containers, no Python needed on your machine.
+- **Option A, Docker (recommended on Linux / Windows).** Three containers, no Python needed on your machine.
 - **Option B, local.** A Python venv plus Ollama installed on your machine. Use this for development.
+- **Option C, Apple Silicon (M1–M4).** A Python venv; the model runs on **MLX** instead of Ollama, and
+  training runs on the Mac GPU (MPS). Docker containers cannot use the Mac GPU, so this is the way to run on a Mac.
 
 Both serve the same URLs:
 
@@ -154,6 +156,41 @@ scripts/dev.sh
 
 Don't run `dev.sh` and the Docker setup at the same time: both use ports 8000, 8100 and 8501.
 
+### 3C. Option C: Apple Silicon (MLX)
+
+```bash
+brew install uv
+uv venv --managed-python -p 3.12 .venv      # uv's Python; Homebrew's 3.12 build can break pyexpat on new macOS
+uv pip install -p .venv -r requirements-dev.txt -r requirements-mac.txt
+.venv/bin/hf download mlx-community/Qwen3.5-4B-4bit                 # 2.5 GB, once
+.venv/bin/python scripts/fetch_datasets.py --large --demo-uploads   # ./datasets + ./demo_uploads
+scripts/dev.sh                                                       # detects Apple Silicon -> LLM_ENGINE=mlx
+```
+
+`dev.sh` starts a fourth process, `agent/mlx_server` on port 11435, and waits until the model is in memory
+(about 2 s from disk). The harness talks to it over the same OpenAI chat API it uses for Ollama.
+
+**Why a custom server instead of `mlx_lm.server`:** `mlx_lm.server` ignores `response_format`, and that
+schema enforcement is what keeps a 4B model reliable here. `mlx_server` adds:
+
+| Feature | What it does |
+| --- | --- |
+| Constrained decoding | An [llguidance](https://github.com/guidance-ai/llguidance) token mask built from the request's JSON schema; the model cannot emit an invalid enum, field or bracket. Compact JSON, so fewer tokens. |
+| Prefix cache | Each task's system prompt is prefilled once and snapshotted; later calls only prefill their own tokens. |
+| Memory manager | Lazy load, unload after `MLX_KEEP_ALIVE` idle seconds, `mx.set_wired_limit` (weights never page out), memory/cache caps, refuses to load when free RAM < `MLX_MIN_FREE_GB`, one request at a time. |
+| Telemetry | `GET /stats`: tok/s, time to first token, cache hits, MLX and system memory. Shown on the UI's **System** page. |
+
+Measured on an M4 / 16 GB: **~37 tok/s** generation, 2.5 GB peak, 3–8 s per structured agent step end to end
+(Ollama on CPU: 10–60 s). YOLOv8n on `medical-pills`: 12 epochs in ~75 s on MPS, mAP50 0.99.
+
+**Memory budget (16 GB):** macOS + apps ~5 GB · LLM ~3 GB · PyTorch training capped at 60% of the GPU working
+set (`PYTORCH_MPS_HIGH_WATERMARK_RATIO`, set per training worker). Small tabular models train on CPU, where
+they are faster than on MPS; detection uses MPS.
+
+**Demo data:** `scripts/seed_demo.py` drives the whole loop through the API (approving every step, including
+up to `SEED_LOOPS` agent-proposed retrains), leaving finished projects for the Dashboard and Experiments pages.
+`demo_uploads/` holds loose CSV/Parquet files and YOLO/COCO zips to drag onto the Data step.
+
 ### 4. Check that it works
 
 ```bash
@@ -193,7 +230,12 @@ In Docker, set these under `environment:` in `docker-compose.yml`. Locally, expo
 
 | Variable | Service | Default | Purpose |
 | --- | --- | --- | --- |
-| `LLM_MODEL` | agent | `qwen3.5:4b-q4_K_M` | Ollama model tag. |
+| `LLM_ENGINE` | agent | `ollama` (`mlx` via `dev.sh` on Apple Silicon) | Which inference server the harness calls. |
+| `LLM_MODEL` | agent | `qwen3.5:4b-q4_K_M` / `mlx-community/Qwen3.5-4B-4bit` | Model tag for the chosen engine. |
+| `MLX_URL` | agent | `http://127.0.0.1:11435` | Where the harness reaches `mlx_server`. |
+| `MLX_KEEP_ALIVE` | mlx_server | `1800` | Seconds idle before the model is unloaded (`0` = never). |
+| `MLX_WIRED_LIMIT_GB` / `MLX_MEMORY_LIMIT_GB` / `MLX_CACHE_LIMIT_GB` | mlx_server | `4` / `6` / `0.5` | Metal memory caps. |
+| `MLX_MIN_FREE_GB` | mlx_server | `3` | Refuse to load the model below this much free RAM (the agent falls back to rules). |
 | `OLLAMA_URL` | agent | `http://127.0.0.1:11434` | Where the harness reaches Ollama. |
 | `OLLAMA_CONTEXT_LENGTH` | agent (Ollama) | `8192` in the container | Context window. Larger uses more VRAM. |
 | `OLLAMA_KEEP_ALIVE` | agent (Ollama) | `10m` in the container | How long the model stays loaded between calls. |
@@ -204,7 +246,7 @@ In Docker, set these under `environment:` in `docker-compose.yml`. Locally, expo
 | `AGENT_TIMEOUT` | backend | `240` | Seconds before a step falls back to rules. |
 | `LOOPBACK_WORKSPACE` | backend | `./workspace` (`/workspace` in Docker) | Projects, runs, memory, weights. |
 | `LOOPBACK_DATASETS` | backend, fetch script | `./datasets` (`/datasets` in Docker) | Datasets listed on the Data screen. |
-| `LOOPBACK_DEVICE` | backend | `auto` | Training device when a spec says `auto`: `auto`, `cpu`, `cuda`. |
+| `LOOPBACK_DEVICE` | backend | `auto` | Training device when a spec says `auto`: `auto`, `cpu`, `cuda`, `mps`. |
 | `LOOPBACK_MONITOR_EVERY` | backend | `5` | Epochs between automatic agent reviews. |
 | `LOOPBACK_LOG_TAIL` | backend | `12` | Log lines the agent sees. |
 | `BACKEND_URL` | frontend | `http://127.0.0.1:8100` (`http://backend:8100` in Docker) | Backend address. |
@@ -249,9 +291,10 @@ To start fresh, stop the services and delete `workspace/`.
 | --- | --- | --- |
 | `agent` | Ollama 0.34.4 + Qwen 3.5 4B `Q4_K_M`, with a **PydanticAI** harness behind FastAPI. It keeps no chat state: the client sends the chat history on every call. | 8000 |
 | `backend` | The 8 steps below, training worker processes, SQLite memory, and `runs/`. | 8100 |
-| `frontend` | Streamlit stepper. Chat history lives in the browser session and can be saved or restored as JSON. | 8501 |
+| `frontend` | Streamlit app: Dashboard, the 8-step Workflow (with a data explorer), Experiments, System. Chat streams token by token; history lives in the browser session and can be saved or restored as JSON. | 8501 |
+| `mlx_server` (Apple Silicon only, no container) | Qwen 3.5 4B on MLX with constrained decoding, prefix cache and memory manager. | 11435 |
 
-**Agent endpoints:** `POST /v1/tasks/{data_summary|suggest|adapt_review|monitor|diagnose|next_step|report}` returns typed JSON. `POST /v1/chat` handles chat. `GET /v1/tasks/{task}/schema` returns a task's schema.
+**Agent endpoints:** `POST /v1/tasks/{data_summary|suggest|adapt_review|monitor|diagnose|next_step|report}` returns typed JSON. `POST /v1/chat` handles chat, `POST /v1/chat/stream` streams it. `GET /v1/tasks/{task}/schema` returns a task's schema. `GET /engine` and `POST /engine/{load|unload}` expose the MLX engine.
 
 **How the 4B model is kept reliable:**
 - Every task has a pydantic schema that Ollama enforces during decoding. Values that depend on the request (candidate ids, column names) become per-request enums.
@@ -270,6 +313,8 @@ To start fresh, stop the services and delete `workspace/`.
 | `breast_cancer` (CSV) | clean binary classification |
 | `titanic` (CSV) | nulls, ID columns, free text, high cardinality |
 | `diabetes` (Parquet) | regression |
+| `wine` (CSV) | 3-class classification, all numeric |
+| `california_housing` (Parquet) | 20k-row regression |
 | `coco8` (YOLO) | 80 classes, mostly with zero boxes |
 | `medical-pills` (YOLO) | real detection data (115 images) |
 | `medical-pills-coco` (COCO) | the same boxes in COCO format, exercising COCO → YOLO |

@@ -296,7 +296,8 @@ def diagnose(run_id: str, project_id: str) -> dict:
 
     def fallback() -> dict:
         if "out of memory" in err.lower():
-            return {"failure_mode": "out_of_memory", "evidence": "CUDA out of memory in error.txt",
+            backend = "MPS" if "mps" in err.lower() else "CUDA"
+            return {"failure_mode": "out_of_memory", "evidence": f"{backend} out of memory in error.txt",
                     "fix": f"batch {spec.train.batch} -> {max(2, spec.train.batch // 2)}"}
         if err:
             return {"failure_mode": "crash", "evidence": err.strip().splitlines()[-1][:200],

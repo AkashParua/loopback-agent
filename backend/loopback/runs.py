@@ -44,6 +44,11 @@ def start(project_id: str, spec: JobSpec, *, parent_run_id: Optional[str] = None
         ev.info("change", parent=parent_run_id, detail=change)
     memory.record_start(run_id, project_id, spec, parent_run_id=parent_run_id, change=change)
     env = {**os.environ, "PYTHONPATH": str(ROOT / "backend") + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    # Apple MPS: run unsupported ops on CPU instead of crashing, and cap PyTorch's share of
+    # unified memory (fraction of the recommended working set) so the resident LLM keeps its.
+    env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    env.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.6")
+    env.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.5")  # must stay below the high ratio
     log = open(d / "worker.out", "w")
     _procs[run_id] = subprocess.Popen([sys.executable, "-m", "loopback.train.worker", str(d)],
                                       stdout=log, stderr=subprocess.STDOUT, env=env, cwd=str(d))

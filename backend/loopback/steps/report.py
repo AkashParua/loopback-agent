@@ -87,10 +87,11 @@ def build(run_id: str, project: dict) -> str:
 
     nar, source, _ = agent.task("report", facts_text, fallback=fallback)
     plot = curve_plot(d, rows, spec.target_metric)
+    engine = {"mlx": "MLX", "ollama": "Ollama"}.get(agent.health().get("engine"), "local LLM")
 
     md = [f"# Loopback report - `{run_id}`", "",
           f"**{nar['headline']}**", "",
-          f"_Narrative by {'Qwen 3.5 4B (Ollama)' if source == 'llm' else 'rule-based fallback'}; "
+          f"_Narrative by {f'Qwen 3.5 4B ({engine})' if source == 'llm' else 'rule-based fallback'}; "
           f"all numbers below are read from run files._", "",
           "## Data", ""]
     if card.get("kind") == "tabular":

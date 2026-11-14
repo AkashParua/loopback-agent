@@ -116,8 +116,11 @@ class RunContext:
         return out
 
 
-def resolve_device(device: str) -> str:
-    """A job spec's "auto" defers to LOOPBACK_DEVICE, then to CUDA if present."""
+def resolve_device(device: str, *, small_tabular: bool = False) -> str:
+    """A job spec's "auto" defers to LOOPBACK_DEVICE, then to CUDA, then Apple MPS.
+
+    small_tabular: an auto-picked MPS device is swapped for CPU - kernel-launch
+    overhead makes a tiny MLP slower on the Apple GPU than on the CPU."""
     import torch
 
     from ..config import DEVICE
@@ -125,5 +128,11 @@ def resolve_device(device: str) -> str:
     if device in ("auto", "", None):
         device = DEVICE
     if device in ("auto", "", None):
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available() and not small_tabular:
+            return "mps"
+        return "cpu"
+    if device == "mps" and not torch.backends.mps.is_available():
+        return "cpu"
     return device

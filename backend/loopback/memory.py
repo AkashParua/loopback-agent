@@ -73,6 +73,12 @@ def history(project_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def all_history() -> list[dict]:
+    with _db() as con:
+        rows = con.execute("SELECT * FROM experiments ORDER BY created_at").fetchall()
+    return [dict(r) for r in rows]
+
+
 def get(run_id: str) -> Optional[dict]:
     with _db() as con:
         row = con.execute("SELECT * FROM experiments WHERE run_id = ?", (run_id,)).fetchone()

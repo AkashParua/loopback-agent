@@ -8,3 +8,4 @@ runs/
 *.db
 *.pt
 .env
+demo_uploads/

@@ -7,65 +7,31 @@ kept client-side (this browser session) and can be downloaded / restored.
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any, Optional
 
-import httpx
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import yaml
 
-BACKEND = os.getenv("BACKEND_URL", "http://127.0.0.1:8100").rstrip("/")
-AGENT = os.getenv("AGENT_URL", "http://127.0.0.1:8000").rstrip("/")
+import views
+from common import CSS, agent_call, api, gauge, plot, stream_chat, style
+
 STEPS = ["Data", "Context", "Suggest", "Adapt", "Train", "Watch", "Eval", "Report"]
-LLM_TIMEOUT = 400
+PAGES = {"Dashboard": "🏠", "Workflow": "🔁", "Experiments": "📊", "System": "🖥️"}
 
 st.set_page_config(page_title="Loopback", page_icon="🔁", layout="wide")
-st.markdown("""
-<style>
-  .block-container {padding-top: 1.6rem; max-width: 1280px;}
-  .agent-card {border: 1px solid rgba(128,128,128,.35); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;}
-  .muted {opacity: .7; font-size: .85rem;}
-  .src {font-size: .75rem; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(128,128,128,.5);}
-  div[data-testid="stSidebar"] button {text-align: left; justify-content: flex-start;}
-</style>""", unsafe_allow_html=True)
+st.markdown(CSS, unsafe_allow_html=True)
 
 ss = st.session_state
 ss.setdefault("pid", None)
 ss.setdefault("step", 1)
 ss.setdefault("chat", [])
+ss.setdefault("page", "Dashboard")
 
 
-# ================================================================== API helpers
-
-def api(method: str, path: str, *, timeout: float = 30, quiet: bool = False, **kw) -> Any:
-    try:
-        r = httpx.request(method, f"{BACKEND}{path}", timeout=timeout, **kw)
-    except httpx.HTTPError as exc:
-        if not quiet:
-            st.error(f"Backend unreachable at {BACKEND}: {exc}")
-        return None
-    if r.status_code >= 400:
-        if not quiet:
-            try:
-                detail = r.json().get("detail")
-            except ValueError:
-                detail = r.text[:400]
-            st.error(f"{method} {path} failed ({r.status_code}): {detail}")
-        return None
-    ctype = r.headers.get("content-type", "")
-    if ctype.startswith("application/json"):
-        return r.json()
-    if ctype.startswith("text/"):
-        return r.text
-    return r.content
-
-
-def agent_call(label: str, method: str, path: str, **kw) -> Any:
-    with st.spinner(f"{label} - Qwen 3.5 4B is thinking (10-60 s)..."):
-        return api(method, path, timeout=LLM_TIMEOUT, **kw)
-
+# ================================================================== helpers
 
 def goto(step: int) -> None:
     ss.step = step
@@ -97,9 +63,19 @@ def sidebar(p: Optional[dict]) -> None:
     with st.sidebar:
         st.markdown("## 🔁 Loopback")
         health = api("GET", "/health", quiet=True, timeout=6)
-        agent_ok = bool(health and health.get("agent", {}).get("ok"))
+        ag = (health or {}).get("agent", {})
+        agent_ok = bool(ag.get("ok"))
+        engine = (ag.get("engine") or "llm").upper()
         st.caption(("🟢" if health else "🔴") + " backend  ·  " + ("🟢" if agent_ok else "🟠") +
-                   (" agent (Qwen 3.5 4B)" if agent_ok else " agent offline - rule-based fallbacks"))
+                   (f" agent · Qwen 3.5 4B on {engine}" if agent_ok else " agent offline - rule-based fallbacks"))
+        if ss.get("last_agent_s"):
+            st.caption(f"⚡ last agent answer: {ss.last_agent_s} s")
+        page = st.radio("Page", list(PAGES), index=list(PAGES).index(ss.page), horizontal=True,
+                        format_func=lambda k: f"{PAGES[k]} {k}", label_visibility="collapsed")
+        if page != ss.page:
+            ss.page = page
+            st.rerun()
+        st.divider()
 
         projects = api("GET", "/projects", quiet=True) or []
         ids = [x["id"] for x in projects]
@@ -120,7 +96,7 @@ def sidebar(p: Optional[dict]) -> None:
                     ss.pid, ss.step = new["id"], 1
                     st.rerun()
 
-        if p:
+        if p and ss.page == "Workflow":
             st.divider()
             for i, name in enumerate(STEPS, start=1):
                 locked = i > p["unlocked"]
@@ -128,6 +104,7 @@ def sidebar(p: Optional[dict]) -> None:
                 icon = "🔒" if locked else ("✅" if done else "▶️") if i != ss.step else "👉"
                 if st.button(f"{icon}  {i}. {name}", key=f"nav{i}", disabled=locked, width="stretch"):
                     goto(i)
+        if p:
             chat_panel(p)
 
 
@@ -141,15 +118,12 @@ def chat_panel(p: dict) -> None:
         q = st.chat_input("Ask about this project...")
         if q:
             ss.chat.append({"role": "user", "content": q})
+            with st.chat_message("user"):
+                st.markdown(q)
             ctx = api("GET", f"/projects/{p['id']}/digest", quiet=True) or ""
-            try:
-                with st.spinner("thinking..."):
-                    r = httpx.post(f"{AGENT}/v1/chat", json={"messages": ss.chat, "context": ctx},
-                                   timeout=LLM_TIMEOUT)
-                r.raise_for_status()
-                ss.chat = r.json()["messages"]
-            except httpx.HTTPError as exc:
-                ss.chat.append({"role": "assistant", "content": f"_agent unavailable: {exc}_"})
+            with st.chat_message("assistant"):
+                reply = st.write_stream(stream_chat(ss.chat, ctx))
+            ss.chat.append({"role": "assistant", "content": reply if isinstance(reply, str) else "".join(reply)})
             st.rerun()
         c1, c2 = st.columns(2)
         c1.download_button("Save chat", json.dumps(ss.chat, indent=2), "loopback-chat.json",
@@ -175,9 +149,10 @@ def header(p: dict) -> tuple[Any, Any]:
 
 
 def agent_card(title: str, body_md: str) -> None:
-    st.markdown(f'<div class="agent-card"><b>{title}</b><br>', unsafe_allow_html=True)
-    st.markdown(body_md)
-    st.markdown("</div>", unsafe_allow_html=True)
+    # one bordered container: an HTML <div> split across st.markdown calls renders empty
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        st.markdown(body_md)
 
 
 # ================================================================== 1. Data
@@ -186,15 +161,19 @@ def step_data(p: dict) -> None:
     left, right = header(p)
     with left:
         st.subheader("Data")
-        tab_up, tab_open = st.tabs(["Upload", "Open datasets"])
+        tab_up, tab_open = st.tabs(["⬆️ Drag & drop", "📚 Open datasets"])
         with tab_up:
-            files = st.file_uploader("CSV / Parquet, or a .zip of a YOLO or COCO folder",
-                                     type=["csv", "parquet", "zip"], accept_multiple_files=True)
-            if files and st.button("Use uploaded files", type="primary"):
+            files = st.file_uploader("Drop a CSV / Parquet file, or a .zip of a YOLO or COCO dataset folder",
+                                     type=["csv", "parquet", "zip"], accept_multiple_files=True,
+                                     key=f"up_{p['id']}")
+            st.caption("Ready-made files to try: `demo_uploads/` in the repo (titanic.csv, wine.csv, california_housing.parquet, "
+                       "medical-pills-yolo.zip, ...). The format is detected automatically.")
+            if files and st.button("🔍 Upload & scan", type="primary", width="stretch"):
                 payload = [("files", (f.name, f.getvalue())) for f in files]
-                if api("POST", f"/projects/{p['id']}/upload", files=payload, timeout=600):
-                    api("POST", f"/projects/{p['id']}/scan", json={}, timeout=600)
-                    st.rerun()
+                with st.spinner("Uploading and scanning schema, nulls, balance, leakage..."):
+                    if api("POST", f"/projects/{p['id']}/upload", files=payload, timeout=600):
+                        api("POST", f"/projects/{p['id']}/scan", json={}, timeout=600)
+                        st.rerun()
         with tab_open:
             ds = api("GET", "/datasets", quiet=True) or []
             if not ds:
@@ -204,9 +183,10 @@ def step_data(p: dict) -> None:
                 kinds = {d["name"]: d["kind"] for d in ds}
                 name = st.selectbox("Dataset", names, format_func=lambda n: f"{n}  ({kinds[n]})")
                 if st.button("Use this dataset", type="primary"):
-                    if api("POST", f"/projects/{p['id']}/dataset", json={"name": name}):
-                        api("POST", f"/projects/{p['id']}/scan", json={}, timeout=600)
-                        st.rerun()
+                    with st.spinner("Scanning..."):
+                        if api("POST", f"/projects/{p['id']}/dataset", json={"name": name}):
+                            api("POST", f"/projects/{p['id']}/scan", json={}, timeout=600)
+                            st.rerun()
 
         card = p.get("card")
         if not card:
@@ -224,10 +204,6 @@ def step_data(p: dict) -> None:
             df["flags"] = df["flags"].map(", ".join)
             df["sample"] = df["sample"].map(lambda xs: ", ".join(map(str, xs)))
             st.dataframe(df, hide_index=True, width="stretch", height=min(420, 38 + 35 * len(df)))
-            ts = card.get("target_stats") or {}
-            if ts.get("kind") == "categorical":
-                st.caption("Target balance")
-                st.bar_chart(pd.Series(ts["counts"], name="rows"), height=180)
         else:
             splits = pd.DataFrame(card["splits"]).T
             c = st.columns(4)
@@ -237,12 +213,15 @@ def step_data(p: dict) -> None:
             s = card.get("image_size") or {}
             c[3].metric("Median size", f"{s.get('median_w', '-')}x{s.get('median_h', '-')}")
             st.dataframe(splits, width="stretch")
-            cls = pd.DataFrame(card["classes"]).set_index("name")["count"]
-            st.caption("Class balance (boxes)")
-            st.bar_chart(cls[cls > 0].sort_values(ascending=False).head(40), height=200)
-            st.caption(f"Box sizes: {card['box_sizes']}  ·  split overlap: {card['overlap']}")
+            ov = card["overlap"]
+            st.caption(f"Split overlap: {ov.get('by_name', 0)} by file name, {ov.get('by_hash', 0)} identical images")
         for w in card.get("warnings", []):
             st.warning(w, icon="⚠️")
+        st.markdown("#### Explore")
+        if kind == "tabular":
+            views.tabular_explorer(p["id"], card)
+        else:
+            views.detect_explorer(p["id"], card)
 
     with right:
         if not card:
@@ -295,8 +274,9 @@ def step_context(p: dict) -> None:
             else:
                 no_flip = c1.checkbox("No horizontal flip (orientation matters)", value=cons.get("no_flip", False))
             max_ep = c2.number_input("Max epochs (0 = no cap)", min_value=0, value=int(cons.get("max_epochs") or 0))
-            device = c2.selectbox("Device", ["auto", "cpu", "cuda"],
-                                  index=["auto", "cpu", "cuda"].index(cons.get("device", "auto")))
+            devices = ["auto", "cpu", "mps", "cuda"]
+            device = c2.selectbox("Device", devices, index=devices.index(cons.get("device", "auto")),
+                                  help="auto = CUDA, else Apple MPS for detection, else CPU")
             if st.form_submit_button("🤖 Ask agent to read the context", width="stretch"):
                 if agent_call("Reading context", "POST", f"/projects/{p['id']}/context",
                               json={"notes": notes, "constraints": {"drop_columns": drop, "no_flip": no_flip,
@@ -447,21 +427,6 @@ def step_adapt(p: dict) -> None:
 
 # ================================================================== 5. Train
 
-def _chart(rows: list[dict], metric: str) -> None:
-    if not rows:
-        st.info("Waiting for the first epoch...")
-        return
-    df = pd.DataFrame(rows).set_index("epoch")
-    num = lambda cols: [c for c in cols if c in df and pd.api.types.is_numeric_dtype(df[c])]  # noqa: E731
-    c1, c2 = st.columns(2)
-    with c1:
-        st.caption("Loss")
-        st.line_chart(df[num(["train_loss", "val_loss"])], height=220)
-    with c2:
-        st.caption(f"val {metric}")
-        st.line_chart(df[num(["val_metric"])], height=220)
-
-
 def step_train(p: dict) -> None:
     left, right = header(p)
     rid = p.get("current_run")
@@ -488,15 +453,25 @@ def live_train(rid: str, p: dict) -> None:
     left, right = st.columns([3, 2], gap="large")
     with left:
         st.subheader(f"Train · `{rid}`")
-        _chart(v["rows"], v["spec"]["target_metric"])
+        views.train_charts(v["rows"], v["spec"]["target_metric"], key="live")
         st.caption("Raw log tail (train.log)")
         st.code("\n".join(json.dumps(r) for r in v["rows"][-12:]) or "-", language="json")
     with right:
         state = stt.get("state")
         icon = {"running": "🟢", "paused": "⏸️", "completed": "✅", "early_stopped": "🛑", "stopped": "⏹️",
                 "failed": "❌", "queued": "⏳"}.get(state, "•")
-        agent_card(f"{icon} {state}", f"epoch {stt.get('epoch', '-')} / {v['spec']['train']['epochs']}"
+        total = v["spec"]["train"]["epochs"]
+        done = len(v["rows"])
+        agent_card(f"{icon} {state}", f"epoch {stt.get('epoch', '-')} / {total} · `{v['spec']['model']}`"
                    + (f"\n\n**Reason:** {stt['reason']}" if stt.get("reason") else ""))
+        st.progress(min(1.0, done / max(1, total)), text=f"{done}/{total} epochs")
+        if v["rows"]:
+            last = v["rows"][-1]
+            m1, m2 = st.columns(2)
+            vm = last.get("val_metric")
+            m1.metric(f"val {v['spec']['target_metric']}", f"{vm:.4f}" if isinstance(vm, (int, float)) else "-")
+            tl = last.get("train_loss")
+            m2.metric("train loss", f"{tl:.4f}" if isinstance(tl, (int, float)) else "-")
         c1, c2, c3 = st.columns(3)
         alive = stt.get("alive")
         if c1.button("⏸ Pause", disabled=not alive or state == "paused", width="stretch"):
@@ -535,7 +510,7 @@ def step_watch(p: dict) -> None:
     vd = v.get("verdict")
     with left:
         st.subheader(f"Watch · `{rid}`")
-        _chart(v["rows"], v["spec"]["target_metric"])
+        views.train_charts(v["rows"], v["spec"]["target_metric"], key="watch")
         if vd:
             st.caption("Signals measured from the log")
             for s in vd.get("signals", []):
@@ -593,12 +568,23 @@ def step_eval(p: dict) -> None:
                         st.rerun()
         else:
             m = ev["metrics"]
+            tm = ev["target_metric"]
+            if isinstance(ev.get("value"), (int, float)):
+                plot(gauge(float(ev["value"]), ev.get("target_value"), f"{tm} on hold-out",
+                           higher_is_better=tm not in ("rmse", "mae")), key="ev_gauge")
             cols = st.columns(len(m))
             for c, (k, val) in zip(cols, m.items()):
                 c.metric(k, f"{val:.4f}" if isinstance(val, float) else val)
             st.caption(f"Split: {ev['split']} (n={ev['n']})" + (f" · {ev['note']}" if ev.get("note") else ""))
             if ev.get("per_class"):
-                st.dataframe(pd.DataFrame(ev["per_class"]).T, width="stretch")
+                pc = pd.DataFrame(ev["per_class"]).T
+                num = [c for c in ("precision", "recall", "f1-score", "mAP50", "mAP50-95", "P", "R")
+                       if c in pc and pd.api.types.is_numeric_dtype(pc[c])]
+                if num:
+                    fig = go.Figure([go.Bar(name=c, x=pc.index.astype(str), y=pc[c]) for c in num])
+                    fig.update_layout(barmode="group", yaxis_range=[0, 1.05], hovermode="closest")
+                    plot(style(fig, height=300, title="Per-class scores"), key="ev_pc")
+                st.dataframe(pc, width="stretch")
             for img in ev.get("images", []):
                 run_image(rid, img)
             if ev.get("errors"):
@@ -640,9 +626,14 @@ def step_eval(p: dict) -> None:
 def step_report(p: dict) -> None:
     left, right = header(p)
     rid = p.get("current_run")
+    if f"report_{rid}" not in ss:  # a report written earlier (another session, seed script) is on disk
+        saved = api("GET", f"/runs/{rid}/files/report.md", quiet=True)
+        if saved:
+            ss[f"report_{rid}"] = saved if isinstance(saved, str) else saved.decode()
     with right:
         agent_card("Report", "Numbers are read from the run files; the agent writes the narrative.")
-        if st.button("🤖 Generate report", type="primary", width="stretch"):
+        label = "🔄 Regenerate report" if ss.get(f"report_{rid}") else "🤖 Generate report"
+        if st.button(label, type="primary", width="stretch"):
             md = agent_call("Writing report", "POST", f"/runs/{rid}/report")
             if md:
                 ss[f"report_{rid}"] = md
@@ -674,10 +665,19 @@ def step_report(p: dict) -> None:
 def main() -> None:
     p = project()
     sidebar(p)
+    if ss.page == "Dashboard":
+        views.dashboard()
+        return
+    if ss.page == "Experiments":
+        views.experiments(p["id"] if p else None)
+        return
+    if ss.page == "System":
+        views.system_page()
+        return
     if not p:
         st.title("🔁 Loopback agent")
         st.markdown("Look at data → pick a model → adapt → train → watch → evaluate → report.  \n"
-                    "Create a project in the sidebar to start.")
+                    "Create a project in the sidebar, or start from a dataset on the Dashboard.")
         return
     if ss.step > p["unlocked"]:
         ss.step = p["unlocked"]

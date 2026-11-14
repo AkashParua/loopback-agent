@@ -1,4 +1,4 @@
-"""PydanticAI harness around the local Ollama model.
+"""PydanticAI harness around the local model (Ollama, or agent/mlx_server on Apple Silicon).
 
 Why this shape works for a 4B model:
   * NativeOutput -> Ollama receives the JSON schema as `response_format` and, on
@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import time
 from functools import lru_cache
-from typing import Any
+from typing import Any, AsyncIterator
 
 import structlog
 from pydantic import BaseModel
@@ -26,14 +26,20 @@ from pydantic_ai import Agent, NativeOutput
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.providers.ollama import OllamaProvider
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from . import prompts
 from .schemas import ChatMessage, output_model
 
 log = structlog.get_logger("harness")
 
+# "ollama" (Docker / Linux) or "mlx" (Apple Silicon, agent/mlx_server). Both speak the
+# OpenAI chat API and both enforce the JSON schema while decoding.
+ENGINE = os.getenv("LLM_ENGINE", "ollama")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
-MODEL_NAME = os.getenv("LLM_MODEL", "qwen3.5:4b-q4_K_M")
+MLX_URL = os.getenv("MLX_URL", "http://127.0.0.1:11435")
+ENGINE_URL = MLX_URL if ENGINE == "mlx" else OLLAMA_URL
+MODEL_NAME = os.getenv("LLM_MODEL", "mlx-community/Qwen3.5-4B-4bit" if ENGINE == "mlx" else "qwen3.5:4b-q4_K_M")
 RETRIES = int(os.getenv("LLM_RETRIES", "2"))
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "900"))
 TIMEOUT = float(os.getenv("LLM_TIMEOUT", "300"))
@@ -53,6 +59,8 @@ def _settings(temperature: float, max_tokens: int = MAX_TOKENS) -> OpenAIChatMod
 
 @lru_cache(maxsize=1)
 def model() -> OpenAIChatModel:
+    if ENGINE == "mlx":
+        return OpenAIChatModel(MODEL_NAME, provider=OpenAIProvider(base_url=f"{MLX_URL}/v1", api_key="local"))
     return OpenAIChatModel(MODEL_NAME, provider=OllamaProvider(base_url=f"{OLLAMA_URL}/v1"))
 
 
@@ -101,13 +109,26 @@ def _to_history(messages: list[ChatMessage]) -> list[ModelMessage]:
     return history
 
 
-async def chat(messages: list[ChatMessage], context: str | None) -> str:
-    """Stateless: history comes from the client every call, nothing is stored here."""
+def _chat_prompt(messages: list[ChatMessage], context: str | None) -> tuple[str, list[ModelMessage]]:
     if not messages or messages[-1].role != "user":
         raise ValueError("last message must be from the user")
     *past, last = messages
     prompt = last.content
     if context:
         prompt = f"Project context:\n{context}\n\nQuestion: {last.content}"
-    result = await chat_agent().run(prompt, message_history=_to_history(past))
+    return prompt, _to_history(past)
+
+
+async def chat(messages: list[ChatMessage], context: str | None) -> str:
+    """Stateless: history comes from the client every call, nothing is stored here."""
+    prompt, history = _chat_prompt(messages, context)
+    result = await chat_agent().run(prompt, message_history=history)
     return result.output
+
+
+async def chat_stream(messages: list[ChatMessage], context: str | None) -> AsyncIterator[str]:
+    """Same as chat(), but yields text deltas as the model produces them."""
+    prompt, history = _chat_prompt(messages, context)
+    async with chat_agent().run_stream(prompt, message_history=history) as result:
+        async for delta in result.stream_text(delta=True):
+            yield delta

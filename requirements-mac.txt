@@ -1,0 +1,5 @@
+# Apple Silicon extras: MLX inference server (agent/mlx_server). Install on top of requirements-dev.txt.
+# The torch wheel from PyPI already includes the MPS (Metal) backend.
+mlx-lm>=0.32
+llguidance>=1.9
+psutil>=5.9

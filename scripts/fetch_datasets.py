@@ -2,6 +2,7 @@
 
     python scripts/fetch_datasets.py            # tabular + coco8 + medical-pills (+ COCO copy)
     python scripts/fetch_datasets.py --large    # also african-wildlife (105 MB)
+    python scripts/fetch_datasets.py --demo-uploads   # + ./demo_uploads: files to drag into the UI
 
 Writes to ./datasets (or $LOOPBACK_DATASETS).
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import shutil
 import sys
 import urllib.request
 import zipfile
@@ -49,6 +51,26 @@ def tabular() -> None:
         dia.frame.rename(columns={"target": "progression"}).to_parquet(d / "diabetes.parquet")
         print("  diabetes: 442 rows, regression (parquet)")
 
+    d = OUT / "wine"
+    if not d.exists():
+        d.mkdir(parents=True)
+        w = datasets.load_wine(as_frame=True)
+        df = w.frame.rename(columns={"target": "cultivar"})
+        df["cultivar"] = df["cultivar"].map(dict(enumerate(w.target_names)))
+        df.to_csv(d / "wine.csv", index=False)
+        print("  wine: 178 rows, 3-class classification")
+
+    d = OUT / "california_housing"
+    if not d.exists():
+        try:
+            ch = datasets.fetch_california_housing(as_frame=True, data_home=str(OUT / ".sklearn"))
+        except OSError as exc:  # needs internet once
+            print(f"  california_housing skipped: {exc}")
+        else:
+            d.mkdir(parents=True)
+            ch.frame.rename(columns={"MedHouseVal": "median_house_value"}).to_parquet(d / "california_housing.parquet")
+            print("  california_housing: 20640 rows, regression (parquet)")
+
     d = OUT / "titanic"
     if not d.exists():
         d.mkdir(parents=True)
@@ -83,9 +105,26 @@ def coco_copy(src: Path, dst: Path) -> None:
     print(f"  {dst.name}: COCO format (converted from {src.name})")
 
 
+def demo_uploads() -> None:
+    """Loose files and zips outside ./datasets, for showing drag & drop in the UI."""
+    dst = ROOT / "demo_uploads"
+    dst.mkdir(exist_ok=True)
+    for src in ("titanic/titanic.csv", "breast_cancer/breast_cancer.csv", "wine/wine.csv",
+                "diabetes/diabetes.parquet", "california_housing/california_housing.parquet"):
+        if (OUT / src).exists():
+            shutil.copy(OUT / src, dst / Path(src).name)
+    for name, zname in (("medical-pills", "medical-pills-yolo"), ("medical-pills-coco", "medical-pills-coco"),
+                        ("coco8", "coco8-yolo")):
+        z = dst / f"{zname}.zip"
+        if (OUT / name).exists() and not z.exists():
+            shutil.make_archive(str(z.with_suffix("")), "zip", OUT, name)
+    print(f"  demo uploads -> {dst}: " + ", ".join(sorted(p.name for p in dst.iterdir())))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--large", action="store_true", help="also fetch african-wildlife (105 MB)")
+    ap.add_argument("--demo-uploads", action="store_true", help="also write ./demo_uploads for drag & drop")
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     print(f"datasets -> {OUT}")
@@ -95,6 +134,8 @@ def main() -> None:
     coco_copy(pills, OUT / "medical-pills-coco")
     if args.large:
         ultralytics_zip("african-wildlife")
+    if args.demo_uploads:
+        demo_uploads()
     print("done")
 
 

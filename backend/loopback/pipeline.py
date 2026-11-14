@@ -368,6 +368,71 @@ def build_report(run_id: str) -> str:
     return report_step.build(run_id, load(project_of(run_id)).model_dump())
 
 
+def run_curves(pid: str) -> dict:
+    """Every run's per-epoch log, for overlaying curves across experiments."""
+    p = load(pid)
+    out = {}
+    for rid in p.run_ids:
+        try:
+            d = runs.run_dir(rid)
+        except FileNotFoundError:
+            continue
+        spec = JobSpec.load(d / "job_spec.yaml")
+        out[rid] = {"model": spec.model, "rows": read_train_log(d), "state": runs.status(rid).get("state"),
+                    "eval": (read_json(d / "eval.json") or {}).get("metrics")}
+    return out
+
+
+def overview() -> dict:
+    """Cross-project numbers for the dashboard."""
+    projects = list_projects()
+    live = {p["id"] for p in projects}
+    exps = [e for e in memory.all_history() if e["project_id"] in live]
+    by_status: dict[str, int] = {}
+    for e in exps:
+        by_status[e["status"]] = by_status.get(e["status"], 0) + 1
+    best = {}
+    for e in exps:
+        m = e["best_metric"] if e["best_metric"] is not None else e["final_metric"]
+        if m is None:
+            continue
+        cur = best.get(e["project_id"])
+        lower = e["target_metric"] in ("rmse", "mae")
+        if cur is None or (m < cur["metric"] if lower else m > cur["metric"]):
+            best[e["project_id"]] = {"run_id": e["run_id"], "model": e["model"], "metric": m,
+                                     "target_metric": e["target_metric"]}
+    data_by_pid = {p["id"]: p["data"] for p in projects}
+    leaderboard = [{"project": pid, "data": data_by_pid.get(pid), **b} for pid, b in best.items()]
+    return {"projects": projects, "n_projects": len(projects), "n_runs": len(exps), "by_status": by_status,
+            "leaderboard": leaderboard, "experiments": exps[-200:]}
+
+
+def delete_project(pid: str) -> dict:
+    d = _pdir(pid)
+    if not d.exists():
+        raise FileNotFoundError(pid)
+    shutil.rmtree(d)
+    return {"deleted": pid}
+
+
+def profile(pid: str) -> dict:
+    from . import explore
+
+    p = load(pid)
+    if not p.card:
+        raise ValueError("scan the data first")
+    return explore.tabular_profile(p.card) if p.card["kind"] == "tabular" else explore.detect_profile(p.card)
+
+
+def samples_png(pid: str, n: int, split: Optional[str], seed: int) -> bytes:
+    from . import explore
+
+    p = load(pid)
+    if not p.card or p.card["kind"] == "tabular":
+        raise ValueError("samples are only available for detection data")
+    return explore.sample_grid(p.card, n=n, split=split, seed=seed)
+
+
 def digest_for_chat(pid: str) -> str:
     """Everything the chat assistant should know about the project, compact."""
     p = load(pid)

@@ -204,8 +204,9 @@ def train_mlp(ctx: RunContext, data: TabularData) -> dict:
     early = EarlyStopping(monitor="val_metric", mode="max" if higher else "min",
                           patience=cfg.patience, check_finite=True)
     logger_cb = LoopbackLogger()
-    device = resolve_device(cfg.device)
-    trainer = L.Trainer(max_epochs=cfg.epochs, accelerator="gpu" if device.startswith("cuda") else "cpu",
+    device = resolve_device(cfg.device, small_tabular=len(Xtr) < 100_000)
+    accelerator = "gpu" if device.startswith("cuda") else "mps" if device == "mps" else "cpu"
+    trainer = L.Trainer(max_epochs=cfg.epochs, accelerator=accelerator,
                         devices=1, callbacks=[logger_cb, early], logger=False, enable_checkpointing=False,
                         enable_progress_bar=False, enable_model_summary=False, num_sanity_val_steps=0,
                         default_root_dir=str(ctx.dir))
@@ -233,7 +234,8 @@ def train_tabnet(ctx: RunContext, data: TabularData) -> dict:
     higher = spec.higher_is_better
     Xtr, ytr = data.splits["train"]
     Xva, yva = data.splits["val"]
-    device = resolve_device(cfg.device)
+    device = resolve_device(cfg.device, small_tabular=True)  # pytorch-tabnet has no MPS path
+    device = "cpu" if device == "mps" else device
     state = {"best": None}
 
     class Bridge(Callback):
