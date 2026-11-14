@@ -6,7 +6,7 @@ doubles as an end-to-end check of backend + agent + training.
     .venv/bin/python scripts/seed_demo.py                       # titanic + medical-pills
     .venv/bin/python scripts/seed_demo.py titanic:mlp wine california_housing medical-pills:yolov8n:20
 
-Each argument is dataset[:model[:epochs]]; model defaults to the agent's first pick.
+Each argument is dataset[:model[:epochs[:imgsz]]]; model defaults to the agent's first pick.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def step(msg: str, t0: float) -> None:
     print(f"  [{time.time() - t0:6.1f}s] {msg}", flush=True)
 
 
-def run(dataset: str, model: str | None = None, epochs: int | None = None) -> str:
+def run(dataset: str, model: str | None = None, epochs: int | None = None, imgsz: int | None = None) -> str:
     t0 = time.time()
     print(f"\n=== {dataset} ===", flush=True)
     p = call("POST", "/projects")
@@ -66,6 +66,8 @@ def run(dataset: str, model: str | None = None, epochs: int | None = None) -> st
     spec = sug[idx]["spec"]
     if epochs:
         spec["train"]["epochs"] = epochs
+    if imgsz:
+        spec.setdefault("adapt", {})["imgsz"] = imgsz
     p = call("POST", f"/projects/{pid}/suggest/approve", json={"index": idx, "spec_yaml": yaml.safe_dump(spec)})
     step(f"adapt review [{p['adapt_review']['source']}] {p['adapt_review']['notes'][:100]}...", t0)
     p = call("POST", f"/projects/{pid}/adapt/apply", json={"plan": p["adapt_plan"]}, timeout=900)
@@ -112,7 +114,8 @@ def main() -> None:
     jobs = sys.argv[1:] or ["titanic:mlp", "wine", "medical-pills:yolov8n:20"]
     for job in jobs:
         name, *rest = job.split(":")
-        run(name, rest[0] if rest and rest[0] else None, int(rest[1]) if len(rest) > 1 else None)
+        run(name, rest[0] if rest and rest[0] else None, int(rest[1]) if len(rest) > 1 else None,
+            int(rest[2]) if len(rest) > 2 else None)
 
 
 if __name__ == "__main__":

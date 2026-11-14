@@ -67,3 +67,39 @@ def test_trainlog_nan_roundtrip_and_digest(tmp_path):
     assert "LOG (last 4 of 6 epochs" in text
     assert "best_val_metric=0.9" in text and "nonfinite_losses=1" in text
     assert "SIGNALS NAN_LOSS" in text
+
+
+def _review_with_llm_answer(tmp_path, monkeypatch, vals, answer):
+    """Run monitor.review on a fake run whose LLM always returns `answer`."""
+    from loopback.config import RUNS_DIR
+    from loopback.steps import monitor
+
+    d = RUNS_DIR / f"t-{tmp_path.name}"
+    d.mkdir(parents=True)
+    spec().save(d / "job_spec.yaml")
+    log = TrainLog(d)
+    for i, v in enumerate(vals):
+        log.write(epoch=i, train_loss=3.0 - 0.1 * i, val_metric=v)
+
+    def fake_task(name, context, *, choices=None, fallback, validate=None):
+        problem = validate(answer) if validate else None
+        return (fallback(), "rules", problem) if problem else (answer, "llm", None)
+
+    monkeypatch.setattr(monitor.agent, "task", fake_task)
+    return monitor.review(d.name, "p-test")
+
+
+def test_llm_stop_on_early_noise_is_rejected(tmp_path, monkeypatch):
+    # the YOLO warm-up dip that a 4B model once called "flat since epoch 0"
+    v = _review_with_llm_answer(tmp_path, monkeypatch, [0.759, 0.738, 0.681], {
+        "verdict": "stop", "evidence_epoch": 2, "evidence": "val_metric 0.6811 flat since epoch 0",
+        "change": None, "reason": "flat"})
+    assert v["source"] == "rules" and v["verdict"] == "continue" and v["status"] == "info"
+    assert "stop without" in v["note"]
+
+
+def test_llm_stop_with_flat_signal_is_kept(tmp_path, monkeypatch):
+    v = _review_with_llm_answer(tmp_path, monkeypatch, [0.5, 0.7] + [0.69] * 7, {
+        "verdict": "stop", "evidence_epoch": 8, "evidence": "val_metric flat since epoch 1",
+        "change": None, "reason": "flat for patience"})
+    assert v["source"] == "llm" and v["verdict"] == "stop"

@@ -223,6 +223,12 @@ def review(run_id: str, project_id: str, *, use_llm: bool = True) -> dict:
             return f"evidence_epoch {out.get('evidence_epoch')} is not in the log"
         if hard and out.get("verdict") != "stop":
             return f"hard signal {hard.kind} requires stop"
+        # the reverse holds too: a small model reads early-epoch noise as "flat" or "diverging",
+        # so stop / change need a measured signal behind them
+        if not hard and out.get("verdict") == "stop":
+            return "stop without a nan_loss, dead_gradients or flat signal in the log"
+        if out.get("verdict") == "change" and not any(s.severity == "change" for s in sigs):
+            return "change without a problem signal in the log"
         if out.get("verdict") == "change":
             return _validate_change(spec, project_id, out.get("change"))
         return None
